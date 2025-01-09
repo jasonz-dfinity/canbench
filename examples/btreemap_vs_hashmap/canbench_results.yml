@@ -1,28 +1,28 @@
 benches:
   insert_users:
     total:
-      instructions: 2570835903
-      heap_increase: 871
+      instructions: 1401462
+      heap_increase: 0
       stable_memory_increase: 0
     scopes: {}
   pre_upgrade_bench:
     total:
-      instructions: 743977526
-      heap_increase: 519
-      stable_memory_increase: 184
+      instructions: 764768
+      heap_increase: 1
+      stable_memory_increase: 1
     scopes:
       serialize_state:
-        instructions: 729045047
-        heap_increase: 519
+        instructions: 747560
+        heap_increase: 1
         stable_memory_increase: 0
       writing_to_stable_memory:
-        instructions: 14930540
+        instructions: 15539
         heap_increase: 0
-        stable_memory_increase: 184
+        stable_memory_increase: 1
   remove_users:
     total:
-      instructions: 2072135114
+      instructions: 44811137
       heap_increase: 0
       stable_memory_increase: 0
     scopes: {}
-version: 0.1.5
+version: 0.1.8

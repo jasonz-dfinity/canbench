@@ -31,6 +31,11 @@ struct Args {
     #[clap(long)]
     no_runtime_integrity_check: bool,
 
+    /// Enable tracing for the benchmarks. If enabled, tracing will be run in additional to the
+    /// benchmark itself, and a graph will be generated in the same directory as the results file.
+    #[clap(long)]
+    tracing: bool,
+
     /// A path to the runtime to use.
     /// Defaults to `.canbench/pocket-ic`.
     #[clap(long)]
@@ -138,6 +143,7 @@ fn main() {
         &results_path,
         !args.less_verbose,
         !args.no_runtime_integrity_check,
+        args.tracing,
         &args.runtime_path.unwrap_or_else(default_runtime_path),
         stable_memory_path,
     );
