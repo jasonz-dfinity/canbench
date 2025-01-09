@@ -410,10 +410,12 @@ use std::collections::BTreeMap;
 
 thread_local! {
     static SCOPES: RefCell<BTreeMap<&'static str, Measurement>> = RefCell::new(BTreeMap::new());
+
+    static TRACING_BUFFER: RefCell<Vec<u8>> = RefCell::new(Vec::new());
 }
 
 /// The results of a benchmark.
-#[derive(Debug, PartialEq, Serialize, Deserialize, CandidType)]
+#[derive(Debug, PartialEq, Serialize, Deserialize, CandidType, Default)]
 pub struct BenchResult {
     /// A measurement for the entire duration of the benchmark.
     pub total: Measurement,
@@ -424,7 +426,7 @@ pub struct BenchResult {
 }
 
 /// A benchmark measurement containing various stats.
-#[derive(Debug, PartialEq, Serialize, Deserialize, CandidType, Clone)]
+#[derive(Debug, PartialEq, Serialize, Deserialize, CandidType, Clone, Default)]
 pub struct Measurement {
     /// The number of instructions.
     #[serde(default)]
@@ -439,29 +441,114 @@ pub struct Measurement {
     pub stable_memory_increase: u64,
 }
 
+static mut INSTRUCTIONS_START: i64 = 0;
+static mut INSTRUCTIONS_END: i64 = 0;
+const NUM_BYTES_ENABLED_FLAG: usize = 4;
+const NUM_BYTES_NUM_ENTRIES: usize = 8;
+const MAX_NUM_LOG_ENTRIES: usize = 100_000;
+const NUM_BYTES_FUNC_ID: usize = 4;
+const NUM_BYTES_INSTRUCTION_COUNTER: usize = 8;
+const BUFFER_SIZE: usize = NUM_BYTES_ENABLED_FLAG
+    + NUM_BYTES_NUM_ENTRIES
+    + MAX_NUM_LOG_ENTRIES * (NUM_BYTES_FUNC_ID + NUM_BYTES_INSTRUCTION_COUNTER);
+const LOGS_START_OFFSET: usize = NUM_BYTES_ENABLED_FLAG + NUM_BYTES_NUM_ENTRIES;
+
+#[export_name = "__prepare_tracing"]
+fn prepare_tracing() -> i32 {
+    TRACING_BUFFER.with_borrow_mut(|b| {
+        *b = vec![0; BUFFER_SIZE];
+        b.as_ptr() as i32
+    })
+}
+
+pub fn get_traces() -> Result<Vec<(i32, i64)>, String> {
+    TRACING_BUFFER.with_borrow(|b| {
+        if b[0] == 1 {
+            panic!("Tracing is still enabled.");
+        }
+        let num_entries = i64::from_le_bytes(
+            b[NUM_BYTES_ENABLED_FLAG..(NUM_BYTES_ENABLED_FLAG + NUM_BYTES_NUM_ENTRIES)]
+                .try_into()
+                .unwrap(),
+        );
+        if num_entries > MAX_NUM_LOG_ENTRIES as i64 {
+            return Err(format!(
+                "There are {} log entries which is more than 100,000, as we can currently support",
+                num_entries
+            ));
+        }
+        let instructions_start = unsafe { INSTRUCTIONS_START };
+        let mut traces = vec![(i32::MAX, 0)];
+        for i in 0..num_entries {
+            let log_start_address = i as usize
+                * (NUM_BYTES_FUNC_ID + NUM_BYTES_INSTRUCTION_COUNTER)
+                + LOGS_START_OFFSET;
+            let func_id = i32::from_le_bytes(
+                b[log_start_address..log_start_address + NUM_BYTES_FUNC_ID]
+                    .try_into()
+                    .unwrap(),
+            );
+            let instruction_counter = i64::from_le_bytes(
+                b[log_start_address + NUM_BYTES_FUNC_ID
+                    ..log_start_address + NUM_BYTES_FUNC_ID + NUM_BYTES_INSTRUCTION_COUNTER]
+                    .try_into()
+                    .unwrap(),
+            );
+            traces.push((func_id, instruction_counter - instructions_start));
+        }
+        traces.push((i32::MIN, unsafe { INSTRUCTIONS_END - instructions_start }));
+        Ok(traces)
+    })
+}
+
 /// Benchmarks the given function.
 pub fn bench_fn<R>(f: impl FnOnce() -> R) -> BenchResult {
     reset();
-    let start_heap = heap_size();
-    let start_stable_memory = ic_cdk::api::stable::stable64_size();
-    let start_instructions = instruction_count();
-    f();
-    let instructions = instruction_count() - start_instructions;
-    let stable_memory_increase = ic_cdk::api::stable::stable64_size() - start_stable_memory;
-    let heap_increase = heap_size() - start_heap;
 
-    let total = Measurement {
-        instructions,
-        heap_increase,
-        stable_memory_increase,
-    };
+    let is_tracing_enabled = TRACING_BUFFER.with_borrow(|p| !p.is_empty());
 
-    let scopes: std::collections::BTreeMap<_, _> = get_scopes_measurements()
-        .into_iter()
-        .map(|(k, v)| (k.to_string(), v))
-        .collect();
+    if !is_tracing_enabled {
+        let start_heap = heap_size();
+        let start_stable_memory = ic_cdk::api::stable::stable64_size();
+        let start_instructions = instruction_count();
+        f();
+        let instructions = instruction_count() - start_instructions;
+        let stable_memory_increase = ic_cdk::api::stable::stable64_size() - start_stable_memory;
+        let heap_increase = heap_size() - start_heap;
 
-    BenchResult { total, scopes }
+        let total = Measurement {
+            instructions,
+            heap_increase,
+            stable_memory_increase,
+        };
+        let scopes: std::collections::BTreeMap<_, _> = get_scopes_measurements()
+            .into_iter()
+            .map(|(k, v)| (k.to_string(), v))
+            .collect();
+
+        BenchResult { total, scopes }
+    } else {
+        // The first 4 bytes are a flag to indicate if tracing is enabled. It will be read by the
+        // tracing function (instrumented code) to decide whether to trace or not.
+        let tracing_started_flag_address = TRACING_BUFFER.with_borrow_mut(|p| p.as_mut_ptr());
+        unsafe {
+            // TODO: Ideally, we'd like to reverse the following 2 statements, but it might be
+            // possible for the compiler not to inline `ic_cdk::api::performance_counter` which
+            // would be problematic as `performance_counter` would be traced itself. Perhaps we can
+            // call ic0.performance_counter directly.
+            INSTRUCTIONS_START = ic_cdk::api::performance_counter(0) as i64;
+            *tracing_started_flag_address = 1;
+        }
+        f();
+        unsafe {
+            *tracing_started_flag_address = 0;
+            INSTRUCTIONS_END = ic_cdk::api::performance_counter(0) as i64;
+        }
+
+        // Only the traces are meaningful, and it's written to `TRACING_BUFFER` and will be
+        // collected in the tracing query method.
+        BenchResult::default()
+    }
 }
 
 /// Benchmarks the scope this function is declared in.

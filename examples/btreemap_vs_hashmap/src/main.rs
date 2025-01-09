@@ -45,7 +45,7 @@ mod benches {
     fn insert_users() {
         STATE.with(|s| {
             let mut s = s.borrow_mut();
-            for i in 0..1_000_000 {
+            for i in 0..1_000 {
                 s.users.insert(
                     i,
                     User {

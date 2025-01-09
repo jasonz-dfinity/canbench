@@ -20,6 +20,10 @@ clap.workspace = true
 colored.workspace = true
 flate2.workspace = true
 hex.workspace = true
+inferno = { version = "0.11", default-features = false, features = [
+    "multithreaded",
+    "nameattr",
+] }
 reqwest.workspace = true
 semver.workspace = true
 serde.workspace = true
@@ -27,7 +31,9 @@ serde_yaml.workspace = true
 sha256.workspace = true
 tempfile.workspace = true
 wasmparser.workspace = true
+walrus.workspace = true
 pocket-ic.workspace = true
+rustc-demangle.workspace = true
 
 [dev-dependencies]
 pretty_assertions = "1.4.0"
