@@ -63,7 +63,7 @@ pub fn bench(arg_tokens: TokenStream, item: TokenStream) -> TokenStream {
 
                 #[ic_cdk::query]
                 #[allow(non_snake_case)]
-                fn #tracing_func_name() -> Vec<(i32, i64)> {
+                fn #tracing_func_name() -> Result<Vec<(i32, i64)>, String> {
                     #func_name();
                     canbench_rs::get_traces()
                 }
@@ -91,7 +91,7 @@ pub fn bench(arg_tokens: TokenStream, item: TokenStream) -> TokenStream {
 
                 #[ic_cdk::query]
                 #[allow(non_snake_case)]
-                fn #tracing_func_name() -> Vec<(i32, i64)> {
+                fn #tracing_func_name() -> Result<Vec<(i32, i64)>, String> {
                     canbench_rs::bench_fn(|| {
                         #func_name();
                     });

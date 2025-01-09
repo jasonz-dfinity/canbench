@@ -227,7 +227,7 @@ fn run_benchmark_with_tracing(
     results_file: &PathBuf,
     bench_instructions: u64,
 ) {
-    let traces: Vec<(i32, i64)> = match pocket_ic.query_call(
+    let traces: Result<Vec<(i32, i64)>, String> = match pocket_ic.query_call(
         canister_id,
         Principal::anonymous(),
         &format!("__tracing__{}", bench_fn),
@@ -235,7 +235,7 @@ fn run_benchmark_with_tracing(
     ) {
         Ok(wasm_res) => match wasm_res {
             WasmResult::Reply(res) => {
-                let res: Vec<(i32, i64)> =
+                let res: Result<Vec<(i32, i64)>, String> =
                     candid::decode_one(&res).expect("error decoding tracing result");
                 res
             }
@@ -252,14 +252,19 @@ fn run_benchmark_with_tracing(
             std::process::exit(1);
         }
     };
-    instrumentation::write_tracing_to_file(
-        traces,
-        bench_instructions,
-        names_mapping,
-        bench_fn,
-        results_file.with_file_name(format!("{}.svg", bench_fn)),
-    )
-    .expect("failed to write tracing results");
+    match traces {
+        Ok(traces) => instrumentation::write_tracing_to_file(
+            traces,
+            bench_instructions,
+            names_mapping,
+            bench_fn,
+            results_file.with_file_name(format!("{}.svg", bench_fn)),
+        )
+        .expect("failed to write tracing results"),
+        Err(e) => {
+            eprint!("Error tracing benchmark {}. Error:\n{}", bench_fn, e);
+        }
+    }
 }
 
 fn read_wasm(canister_wasm_path: &PathBuf) -> Vec<u8> {
@@ -303,11 +308,12 @@ mod instrumentation {
 
         let func_id = module.locals.add(ValType::I32);
         let num_logs_address = module.locals.add(ValType::I32);
-        let num_logs_before = module.locals.add(ValType::I32);
+        let num_logs_before = module.locals.add(ValType::I64);
         let new_log_address = module.locals.add(ValType::I32);
         let store_kind_i32 = StoreKind::I32 { atomic: false };
         let load_kind_i32 = LoadKind::I32 { atomic: false };
         let store_kind_i64 = StoreKind::I64 { atomic: false };
+        let load_kind_i64 = LoadKind::I64 { atomic: false };
         let mem_arg_i32 = MemArg {
             offset: 0,
             align: 4,
@@ -317,44 +323,61 @@ mod instrumentation {
             align: 8,
         };
 
-        // TODO: check the number of logs before appending the traces, otherwise the traces can
-        // overflow with "heap out of bound" which is confusing.
-        body.global_get(trace_start_address)
-            .load(memory, load_kind_i32, mem_arg_i32)
-            .i32_const(1)
-            .binop(BinaryOp::I32Eq)
-            .if_else(
-                None,
-                |then| {
-                    then.global_get(trace_start_address)
-                        .i32_const(4)
-                        .binop(BinaryOp::I32Add)
-                        .local_tee(num_logs_address)
-                        .local_get(num_logs_address)
-                        .load(memory, load_kind_i32, mem_arg_i32)
-                        .local_tee(num_logs_before)
-                        .i32_const(1)
-                        .binop(BinaryOp::I32Add)
-                        .store(memory, store_kind_i32, mem_arg_i32)
-                        .local_get(num_logs_before)
-                        .i32_const(12)
-                        .binop(BinaryOp::I32Mul)
-                        .i32_const(8) // 4 bytes for enabled flag, 4 bytes for number of entries
-                        .binop(BinaryOp::I32Add)
-                        .global_get(trace_start_address)
-                        .binop(BinaryOp::I32Add)
-                        .local_tee(new_log_address)
-                        .local_get(func_id)
-                        .store(memory, store_kind_i32, mem_arg_i32)
-                        .local_get(new_log_address)
-                        .i32_const(4)
-                        .binop(BinaryOp::I32Add)
-                        .i32_const(0)
-                        .call(performance_counter)
-                        .store(memory, store_kind_i64, mem_arg_i64);
-                },
-                |_| {},
-            );
+        // Check whether tracing is enabled, leaving the value (0 or 1 as i32) in the stack.
+        let is_tracing_enabled = |body: &mut InstrSeqBuilder| {
+            body.global_get(trace_start_address)
+                .load(memory, load_kind_i32, mem_arg_i32)
+                .i32_const(1)
+                .binop(BinaryOp::I32Eq);
+        };
+        // Increment the number of logs by 1, while setting `num_logs_before` to the previous value,
+        // and `num_logs_address` to the address of the number of logs.
+        let increment_num_logs = |body: &mut InstrSeqBuilder| {
+            body.global_get(trace_start_address)
+                .i32_const(4)
+                .binop(BinaryOp::I32Add)
+                .local_tee(num_logs_address)
+                .local_get(num_logs_address)
+                .load(memory, load_kind_i64, mem_arg_i64)
+                .local_tee(num_logs_before)
+                .i64_const(1)
+                .binop(BinaryOp::I64Add)
+                .store(memory, store_kind_i64, mem_arg_i64);
+        };
+        // Assuming the number of logs is less than 100_000 (therefore the number can be wrapped as
+        // i32), write a log entry.
+        let write_log = |body: &mut InstrSeqBuilder| {
+            increment_num_logs(body);
+            body.local_get(num_logs_before)
+                .unop(UnaryOp::I32WrapI64)
+                .i32_const(12)
+                .binop(BinaryOp::I32Mul)
+                .i32_const(12) // 4 bytes for enabled flag, 4 bytes for number of entries
+                .binop(BinaryOp::I32Add)
+                .global_get(trace_start_address)
+                .binop(BinaryOp::I32Add)
+                .local_tee(new_log_address)
+                .local_get(func_id)
+                .store(memory, store_kind_i32, mem_arg_i32)
+                .local_get(new_log_address)
+                .i32_const(4)
+                .binop(BinaryOp::I32Add)
+                .i32_const(0)
+                .call(performance_counter)
+                .store(memory, store_kind_i64, mem_arg_i64);
+        };
+        let write_log_if_not_full = |body: &mut InstrSeqBuilder| {
+            body.global_get(trace_start_address)
+                .i32_const(4)
+                .binop(BinaryOp::I32Add)
+                .load(memory, load_kind_i64, mem_arg_i64)
+                .i64_const(100_000)
+                .binop(BinaryOp::I64LtU)
+                .if_else(None, write_log, increment_num_logs);
+        };
+
+        is_tracing_enabled(&mut body);
+        body.if_else(None, write_log_if_not_full, |_| {});
         builder.finish(vec![func_id], &mut module.funcs)
     }
 

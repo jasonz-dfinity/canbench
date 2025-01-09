@@ -443,39 +443,61 @@ pub struct Measurement {
 
 static mut INSTRUCTIONS_START: i64 = 0;
 static mut INSTRUCTIONS_END: i64 = 0;
+const NUM_BYTES_ENABLED_FLAG: usize = 4;
+const NUM_BYTES_NUM_ENTRIES: usize = 8;
+const MAX_NUM_LOG_ENTRIES: usize = 100_000;
+const NUM_BYTES_FUNC_ID: usize = 4;
+const NUM_BYTES_INSTRUCTION_COUNTER: usize = 8;
+const BUFFER_SIZE: usize = NUM_BYTES_ENABLED_FLAG
+    + NUM_BYTES_NUM_ENTRIES
+    + MAX_NUM_LOG_ENTRIES * (NUM_BYTES_FUNC_ID + NUM_BYTES_INSTRUCTION_COUNTER);
+const LOGS_START_OFFSET: usize = NUM_BYTES_ENABLED_FLAG + NUM_BYTES_NUM_ENTRIES;
 
 #[export_name = "__prepare_tracing"]
 fn prepare_tracing() -> i32 {
     TRACING_BUFFER.with_borrow_mut(|b| {
-        *b = vec![0; 1_200_000];
+        *b = vec![0; BUFFER_SIZE];
         b.as_ptr() as i32
     })
 }
 
-pub fn get_traces() -> Vec<(i32, i64)> {
+pub fn get_traces() -> Result<Vec<(i32, i64)>, String> {
     TRACING_BUFFER.with_borrow(|b| {
         if b[0] == 1 {
             panic!("Tracing is still enabled.");
         }
-        let num_entries = i32::from_le_bytes(b[4..8].try_into().unwrap());
+        let num_entries = i64::from_le_bytes(
+            b[NUM_BYTES_ENABLED_FLAG..(NUM_BYTES_ENABLED_FLAG + NUM_BYTES_NUM_ENTRIES)]
+                .try_into()
+                .unwrap(),
+        );
+        if num_entries > MAX_NUM_LOG_ENTRIES as i64 {
+            return Err(format!(
+                "There are {} log entries which is more than 100,000, as we can currently support",
+                num_entries
+            ));
+        }
         let instructions_start = unsafe { INSTRUCTIONS_START };
         let mut traces = vec![(i32::MAX, 0)];
         for i in 0..num_entries {
-            let log_start_address = 8 + i as usize * 12;
+            let log_start_address = i as usize
+                * (NUM_BYTES_FUNC_ID + NUM_BYTES_INSTRUCTION_COUNTER)
+                + LOGS_START_OFFSET;
             let func_id = i32::from_le_bytes(
-                b[log_start_address..log_start_address + 4]
+                b[log_start_address..log_start_address + NUM_BYTES_FUNC_ID]
                     .try_into()
                     .unwrap(),
             );
             let instruction_counter = i64::from_le_bytes(
-                b[log_start_address + 4..log_start_address + 12]
+                b[log_start_address + NUM_BYTES_FUNC_ID
+                    ..log_start_address + NUM_BYTES_FUNC_ID + NUM_BYTES_INSTRUCTION_COUNTER]
                     .try_into()
                     .unwrap(),
             );
             traces.push((func_id, instruction_counter - instructions_start));
         }
         traces.push((i32::MIN, unsafe { INSTRUCTIONS_END - instructions_start }));
-        traces
+        Ok(traces)
     })
 }
 
